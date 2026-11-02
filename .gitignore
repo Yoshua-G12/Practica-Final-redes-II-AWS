@@ -1,0 +1,21 @@
+# Archivos locales del sistema y del editor
+.DS_Store
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Credenciales y configuración privada
+.aws/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencias y resultados temporales de herramientas de verificación
+node_modules/
+__pycache__/
+*.pyc
+*.log
+tmp/

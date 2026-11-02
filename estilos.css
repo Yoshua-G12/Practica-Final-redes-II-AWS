@@ -1,0 +1,44 @@
+/* ================================================================
+   PERSONALICE AQUI: colores y tipografia del sitio de su grupo
+   ================================================================ */
+:root {
+  --color-principal: #1a5fb4;   /* botones, titulos y barras */
+  --color-oscuro: #131b26;      /* encabezado */
+  --color-fondo: #f3f5f9;       /* fondo de la pagina */
+  --color-tarjeta: #ffffff;     /* fondo de las tarjetas */
+  --color-suave: #eef4ff;       /* cuadros de datos */
+  --fuente: "Segoe UI", Arial, Helvetica, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; font-family: var(--fuente); background: var(--color-fondo); color: #131b26; }
+header { background: var(--color-oscuro); color: #f4f1ea; padding: 40px 24px; text-align: center; }
+header h1 { margin: 8px 0; font-size: 2rem; }
+.etiqueta { color: #9cc3ff; text-transform: uppercase; letter-spacing: 2px; font-size: .8rem; margin: 0; }
+.sub { color: #b9c4d3; margin: 0; }
+.grupo { margin: 12px 0 0; color: #b9c4d3; }
+.grupo span { color: #f4f1ea; font-weight: 600; }
+main { max-width: 1100px; margin: 24px auto; padding: 0 16px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.tarjeta { background: var(--color-tarjeta); border-radius: 14px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,.06); }
+.tarjeta.ancha { grid-column: 1 / -1; }
+.tarjeta h2 { margin-top: 0; color: var(--color-principal); font-size: 1.2rem; }
+.tarjeta p { color: #3b4656; }
+.servidor { display: grid; grid-template-columns: 1fr; gap: 10px; margin: 16px 0; }
+.servidor div { background: var(--color-suave); border-radius: 10px; padding: 12px 16px; }
+.dato { display: block; font-family: Consolas, "Courier New", monospace; font-size: 1.05rem; font-weight: 700; word-break: break-all; }
+.nombre { font-size: .8rem; color: #5e6878; }
+.historial { font-family: Consolas, "Courier New", monospace; font-size: .85rem; }
+button { background: var(--color-principal); color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; font-size: .95rem; cursor: pointer; }
+button:hover { filter: brightness(.85); }
+.total { font-size: 1.1rem; }
+.barra { margin: 10px 0; }
+.barra .titulo { display: flex; justify-content: space-between; font-size: .85rem; font-family: Consolas, "Courier New", monospace; }
+.barra .fondo { background: #e4e9f2; border-radius: 6px; height: 18px; overflow: hidden; }
+.barra .relleno { background: var(--color-principal); height: 100%; transition: width .5s; }
+form { display: flex; gap: 10px; flex-wrap: wrap; }
+input { flex: 1; min-width: 180px; padding: 10px; border: 1px solid #cfd6e2; border-radius: 8px; font-size: .95rem; }
+#mensajes { list-style: none; padding: 0; }
+#mensajes li { border-bottom: 1px solid #eef0f4; padding: 10px 0; }
+#mensajes .meta { font-size: .78rem; color: #5e6878; }
+footer { text-align: center; color: #5e6878; font-size: .85rem; padding: 24px; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; } }

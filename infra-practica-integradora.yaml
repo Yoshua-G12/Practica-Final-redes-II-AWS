@@ -1,0 +1,700 @@
+# =====================================================================================
+#  PRÁCTICA INTEGRADORA · Arquitectura de tres capas en AWS
+#  Sitio estático (S3 + CloudFront) · API Node.js en EC2 con balanceador y Auto Scaling
+#  · Base de datos RDS PostgreSQL en subredes privadas
+#
+#  CÓMO LEER LOS COMENTARIOS
+#    [SE PUEDE CAMBIAR]  valores pensados para que el grupo los personalice
+#    [CON CUIDADO]       se puede cambiar, pero afecta a otros recursos o borra datos
+#    [NO CAMBIAR]        si se modifica, la pila falla o deja de funcionar
+#
+#  REGLAS GENERALES
+#    - YAML depende de la sangría: use espacios, nunca tabulaciones.
+#    - No cambie los nombres lógicos (VPC, PublicSubnetA, Database...): otros recursos
+#      los usan con !Ref y !GetAtt, y los comandos de CloudShell leen las Outputs.
+#    - Después de cambiar algo: CloudFormation > la pila > Actualizar > Reemplazar plantilla.
+# =====================================================================================
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Practica integradora - Arquitectura de tres capas en AWS.
+  Sitio estatico en S3 + CloudFront, API Node.js en EC2 con Auto Scaling detras de un
+  Application Load Balancer en dos zonas, y base de datos Amazon RDS for PostgreSQL privada.
+
+# -------------------------------------------------------------------------------------
+# PARÁMETROS: lo que la consola pregunta al crear la pila.
+# -------------------------------------------------------------------------------------
+Parameters:
+  # Usuario administrador de PostgreSQL. [CON CUIDADO] cambiarlo después de crear la pila
+  # reemplaza la base de datos y se pierden los datos.
+  DBUser:
+    Description: Usuario maestro de PostgreSQL
+    Type: String
+    Default: adminpg
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9]{3,15}$"
+    ConstraintDescription: Empieza con letra, de 4 a 16 letras o numeros.
+
+  # Contraseña de PostgreSQL. NoEcho la oculta en la consola.
+  # [NO CAMBIAR] la regla de solo letras y números: se escribe en archivos del servidor.
+  DBPassword:
+    Description: Contrasena de PostgreSQL (solo letras y numeros, de 8 a 41)
+    Type: String
+    NoEcho: true
+    AllowedPattern: "^[a-zA-Z0-9]{8,41}$"
+    ConstraintDescription: Solo letras y numeros, de 8 a 41 caracteres.
+
+  # Tamaño de cada servidor. [SE PUEDE CAMBIAR] t3.small tiene el doble de memoria.
+  # Solo tipos x86 (t3): el script de arranque descarga Node.js para x86.
+  InstanceType:
+    Description: Tipo de instancia para los servidores de la API
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+
+  # Desde dónde se permite SSH (puerto 22). [SE PUEDE CAMBIAR] por su IP (ej. 190.1.2.3/32),
+  # pero entonces EC2 Instance Connect desde la consola deja de funcionar.
+  SSHLocation:
+    Description: Rango de IP que puede entrar por SSH (0.0.0.0/0 permite EC2 Instance Connect desde la consola)
+    Type: String
+    Default: 0.0.0.0/0
+
+  # Última imagen de Amazon Linux 2023, leída de SSM. [NO CAMBIAR]
+  LatestAmiId:
+    Description: Ultima AMI de Amazon Linux 2023 (no cambiar)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  # ===================================================================================
+  # CAPA DE RED: VPC, subredes, salida a internet y tablas de rutas
+  # ===================================================================================
+
+  # La red privada del proyecto: 10.0.0.0/16 = 65,536 direcciones.
+  # [CON CUIDADO] cambiar el CIDR reemplaza TODA la red y todo lo que vive en ella.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true      # [NO CAMBIAR] RDS necesita DNS dentro de la VPC
+      EnableDnsHostnames: true    # [NO CAMBIAR]
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+
+  # Puerta de la VPC hacia internet. [NO CAMBIAR]
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
+
+  # Conecta el Internet Gateway a la VPC. [NO CAMBIAR]
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subredes PÚBLICAS (balanceador y servidores), una por zona de disponibilidad.
+  # [CON CUIDADO] el CIDR se puede cambiar si queda dentro de 10.0.0.0/16 y no se cruza
+  # con otra subred; reemplaza la subred y los servidores.
+  # !Select [0, !GetAZs ""] = la primera zona de la región (us-east-1a); [1] = la segunda.
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true   # [NO CAMBIAR] los servidores necesitan IP pública para descargar Node.js
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-publica-a" }]
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-publica-b" }]
+
+  # Subredes PRIVADAS (base de datos). No tienen ruta a internet.
+  # RDS exige dos subredes en zonas distintas aunque la base use una sola.
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-privada-a" }]
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-privada-b" }]
+
+  # Tabla de rutas de las subredes públicas. [NO CAMBIAR]
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-rutas-publicas" }]
+
+  # La ruta 0.0.0.0/0 hacia el Internet Gateway: es lo que hace "pública" a una subred.
+  # [NO CAMBIAR]
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Asocia cada subred pública a la tabla de rutas pública. [NO CAMBIAR]
+  # (Las privadas usan la tabla principal de la VPC, que solo tiene la ruta local.)
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  # ===================================================================================
+  # SEGURIDAD: grupos de seguridad (firewalls). Cada capa solo acepta a la anterior.
+  #   Internet --80--> sg-alb --3000--> sg-api --5432--> sg-bd
+  # ===================================================================================
+
+  # Balanceador: acepta HTTP (80) desde cualquier lugar.
+  # [SE PUEDE CAMBIAR] agregar más reglas; [NO CAMBIAR] quitar la del puerto 80.
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Balanceador - HTTP desde internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-alb" }]
+
+  # Servidores API: el puerto 3000 SOLO desde el grupo del balanceador (no desde internet).
+  # [NO CAMBIAR] el origen del puerto 3000: es la demostración de seguridad de la práctica.
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Servidores API - puerto 3000 solo desde el balanceador, SSH para administrar
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3000, ToPort: 3000, SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref SSHLocation }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-api" }]
+
+  # Base de datos: PostgreSQL (5432) SOLO desde los servidores API. [NO CAMBIAR]
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL - puerto 5432 solo desde los servidores API
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref WebServerSecurityGroup }
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-sg-bd" }]
+
+  # ===================================================================================
+  # CAPA DE DATOS: Amazon RDS for PostgreSQL
+  # ===================================================================================
+
+  # Las subredes donde puede vivir la base: las dos privadas. [NO CAMBIAR]
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subredes privadas para RDS
+      SubnetIds: [!Ref PrivateSubnetA, !Ref PrivateSubnetB]
+
+  # La base de datos. Tarda unos 10 minutos en crearse.
+  # DeletionPolicy Delete: al borrar la pila se borra sin copia final (no deja cobros).
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Engine: postgres                # [NO CAMBIAR] la API usa el controlador de PostgreSQL
+      DBInstanceClass: db.t4g.micro   # [CON CUIDADO] clases más grandes cuestan más
+      AllocatedStorage: "20"          # [SE PUEDE CAMBIAR] solo hacia arriba (GiB)
+      StorageType: gp3
+      DBName: proyecto                # [NO CAMBIAR] la API se conecta a "proyecto"
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref DatabaseSecurityGroup]
+      PubliclyAccessible: false       # [NO CAMBIAR] la base no debe ser visible desde internet
+      MultiAZ: false                  # [CON CUIDADO] true = copia en espera en otra zona, costo doble
+      BackupRetentionPeriod: 0        # sin copias automáticas: la creación es más rápida
+      DeletionProtection: false       # [NO CAMBIAR] si es true, la pila no se puede borrar
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-postgres" }]
+
+  # ===================================================================================
+  # CAPA DE APLICACIÓN: servidores con Auto Scaling
+  # ===================================================================================
+
+  # Plantilla de lanzamiento: el "molde" de cada servidor que crea Auto Scaling.
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        SecurityGroupIds: [!Ref WebServerSecurityGroup]
+        MetadataOptions:               # [NO CAMBIAR] IMDSv2: el script lee el ID y la zona así
+          HttpTokens: required
+          HttpEndpoint: enabled
+        TagSpecifications:
+          - ResourceType: instance
+            Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-api" }]
+        # UserData: script que cada servidor ejecuta UNA vez al encender.
+        # Instala Node.js, escribe la API (server.js) y la deja corriendo como servicio.
+        # [SE PUEDE CAMBIAR] el código de la API: busque PERSONALICE dentro de server.js.
+        # Regla de !Sub: CloudFormation reemplaza todo ${Algo}. En JavaScript escriba ${!algo}.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Script de arranque: se ejecuta UNA vez al encender cada servidor.
+            # Registro de lo que hizo: /var/log/cloud-init-output.log
+            # Partes 1, 2, 4, 5 y el atajo bd: [NO CAMBIAR]. Parte 3 (server.js): [SE PUEDE CAMBIAR].
+            set -x
+
+            # 1. Node.js 22 y cliente de PostgreSQL (psql). [NO CAMBIAR]
+            curl -fsSL https://nodejs.org/dist/v22.22.0/node-v22.22.0-linux-x64.tar.xz -o /tmp/node.tar.xz \
+              && mkdir -p /opt/node && tar -xJf /tmp/node.tar.xz -C /opt/node --strip-components=1 \
+              || { dnf install -y nodejs nodejs-npm; mkdir -p /opt/node/bin; ln -sf "$(command -v node)" /opt/node/bin/node; ln -sf "$(command -v npm)" /opt/node/bin/npm; }
+            ln -sf /opt/node/bin/node /usr/local/bin/node
+            ln -sf /opt/node/bin/npm /usr/local/bin/npm
+            dnf install -y postgresql16 || dnf install -y postgresql15 || true
+
+            # 2. ID y zona de este servidor, leidos del servicio de metadatos (IMDSv2). [NO CAMBIAR]
+            TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+            ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+            AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+            # 3. Codigo de la API. [SE PUEDE CAMBIAR] server.js; package.json solo si agrega librerias
+            mkdir -p /opt/api && cd /opt/api
+            curl -fsSL -o rds-ca.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem || true
+
+            cat > package.json <<'ARCHIVO'
+            {
+              "name": "api-practica-integradora",
+              "version": "1.0.0",
+              "main": "server.js",
+              "scripts": {
+                "start": "node server.js"
+              },
+              "dependencies": {
+                "express": "^5.1.0",
+                "pg": "^8.13.0"
+              }
+            }
+            ARCHIVO
+
+            cat > server.js <<'ARCHIVO'
+            // Practica integradora: API en Node.js detras de un Application Load Balancer
+            // Base de datos: Amazon RDS for PostgreSQL
+            //
+            // [SE PUEDE CAMBIAR] agregar rutas (bloque PERSONALICE), tablas (constante TABLAS)
+            //                    y los textos de las respuestas.
+            // [NO CAMBIAR] /api/ping (chequeo de salud del balanceador), /api/visita y
+            //              /api/estadisticas (pruebas de carga), el puerto y la conexion a la base.
+            // Si edita este codigo dentro del YAML, siga la regla de !Sub escrita arriba del UserData.
+            const fs = require('fs');
+            const express = require('express');
+            const { Pool } = require('pg');
+
+            const SERVIDOR = process.env.INSTANCE_ID || 'local';
+            const ZONA = process.env.AZ || 'local';
+            const PUERTO = Number(process.env.PORT || 3000);
+
+            // Conexion cifrada con el certificado de AWS (DB_SSL=off solo para pruebas locales)
+            let ssl;
+            if (process.env.DB_SSL !== 'off') {
+              const ca = process.env.DB_SSL_CA && fs.existsSync(process.env.DB_SSL_CA)
+                ? fs.readFileSync(process.env.DB_SSL_CA, 'utf8') : undefined;
+              ssl = ca ? { ca } : { rejectUnauthorized: false };
+            }
+
+            const pool = new Pool({
+              host: process.env.DB_HOST || 'localhost',
+              user: process.env.DB_USER || 'postgres',
+              password: process.env.DB_PASSWORD || '',
+              database: process.env.DB_NAME || 'proyecto',
+              port: 5432,
+              ssl,
+              max: 10
+            });
+
+            const app = express();
+            app.use(express.json());
+
+            // Registro de cada peticion: se ve con  journalctl -u api -f
+            app.use((req, res, next) => {
+              const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+              res.on('finish', () => {
+                if (req.path !== '/api/ping') {
+                  console.log(`${!new Date().toISOString()} ${!ip} ${!req.method} ${!req.originalUrl} -> ${!res.statusCode}`);
+                }
+              });
+              req.ipCliente = ip;
+              next();
+            });
+
+            // Chequeo de salud del balanceador (no toca la base de datos). [NO CAMBIAR]
+            app.get('/api/ping', (req, res) => res.send('ok'));
+
+            // Que servidor respondio y si la base de datos esta conectada
+            app.get('/api/salud', async (req, res) => {
+              const { rows } = await pool.query('SELECT NOW() AS hora_bd, version() AS version');
+              res.json({ servidor: SERVIDOR, zona: ZONA, hora_bd: rows[0].hora_bd, version: rows[0].version.split(' on ')[0] });
+            });
+
+            // Registra una visita: esta es la ruta que se usa en la prueba de carga. [NO CAMBIAR]
+            app.get('/api/visita', async (req, res) => {
+              await pool.query(
+                'INSERT INTO visitas (servidor, zona, ip, agente) VALUES ($1, $2, $3, $4)',
+                [SERVIDOR, ZONA, req.ipCliente, (req.headers['user-agent'] || '').slice(0, 200)]
+              );
+              res.json({ mensaje: 'Visita registrada', servidor: SERVIDOR, zona: ZONA });
+            });
+
+            // Cuantas peticiones atendio cada servidor. [NO CAMBIAR]
+            app.get('/api/estadisticas', async (req, res) => {
+              const { rows } = await pool.query(`
+                SELECT servidor, zona, COUNT(*)::int AS peticiones,
+                       COUNT(*) FILTER (WHERE fecha > NOW() - INTERVAL '1 minute')::int AS ultimo_minuto,
+                       MAX(fecha) AS ultima
+                FROM visitas GROUP BY servidor, zona ORDER BY servidor`);
+              const total = rows.reduce((s, r) => s + r.peticiones, 0);
+              res.json({ respondio: SERVIDOR, total, servidores: rows });
+            });
+
+            // Libro de visitas. [SE PUEDE CAMBIAR] o reemplazar por el tema del grupo
+            app.get('/api/mensajes', async (req, res) => {
+              const { rows } = await pool.query(
+                'SELECT id, nombre, mensaje, servidor, fecha FROM mensajes ORDER BY id DESC LIMIT 50');
+              res.json(rows);
+            });
+
+            app.post('/api/mensajes', async (req, res) => {
+              const nombre = String((req.body || {}).nombre || '').trim().slice(0, 80);
+              const mensaje = String((req.body || {}).mensaje || '').trim().slice(0, 500);
+              if (!nombre || !mensaje) {
+                return res.status(400).json({ error: 'Envie nombre y mensaje' });
+              }
+              const { rows } = await pool.query(
+                'INSERT INTO mensajes (nombre, mensaje, servidor) VALUES ($1, $2, $3) RETURNING id',
+                [nombre, mensaje, SERVIDOR]);
+              res.status(201).json({ mensaje: 'Mensaje guardado', id: rows[0].id, servidor: SERVIDOR });
+            });
+
+            // ------------------------------------------------------------------
+            // PERSONALICE AQUI: agregue sus propias rutas. Ejemplo (quite las // para usarlo):
+            //
+            // app.get('/api/hola', (req, res) => {
+            //   res.json({ mensaje: 'Hola desde el grupo', servidor: SERVIDOR, zona: ZONA });
+            // });
+            // ------------------------------------------------------------------
+
+            // Liga de Servidores AWS: identidad real, sin consultar ni modificar la base.
+            app.get('/api/equipo', (req, res) => {
+              const equipos = {
+                'us-east-2a': 'Equipo Esmeralda',
+                'us-east-2b': 'Equipo Dorado'
+              };
+              res.json({
+                liga: 'Liga de Servidores AWS',
+                version: 'liga-v1',
+                equipo: equipos[ZONA] || 'Equipo visitante',
+                servidor: SERVIDOR,
+                zona: ZONA,
+                mensaje: 'Cada peticion suma al juego.'
+              });
+            });
+
+            // Cualquier error de base de datos se responde sin detener el servidor
+            app.use((err, req, res, next) => {
+              console.error('Error:', err.message);
+              res.status(500).json({ error: err.message, servidor: SERVIDOR });
+            });
+
+            const TABLAS = `
+              CREATE TABLE IF NOT EXISTS visitas (
+                id BIGSERIAL PRIMARY KEY,
+                servidor VARCHAR(40) NOT NULL,
+                zona VARCHAR(40) NOT NULL,
+                ip VARCHAR(60),
+                agente VARCHAR(200),
+                fecha TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );
+              CREATE TABLE IF NOT EXISTS mensajes (
+                id SERIAL PRIMARY KEY,
+                nombre VARCHAR(80) NOT NULL,
+                mensaje VARCHAR(500) NOT NULL,
+                servidor VARCHAR(40) NOT NULL,
+                fecha TIMESTAMPTZ NOT NULL DEFAULT NOW()
+              );`;
+
+            // Arranque: espera a que la base responda (puede tardar si se acaba de crear)
+            async function iniciar() {
+              for (let intento = 1; intento <= 30; intento++) {
+                try {
+                  await pool.query(TABLAS);
+                  console.log(`Conectado a PostgreSQL. Servidor ${!SERVIDOR} en ${!ZONA}`);
+                  break;
+                } catch (err) {
+                  // Si dos servidores crean las tablas al mismo tiempo, una puede fallar: ya existen
+                  if (err.code === '23505' || err.code === '42P07') break;
+                  console.error(`Intento ${!intento}: no se pudo conectar a la base (${!err.code || ''} ${!err.message})`);
+                  if (intento === 30) process.exit(1);
+                  await new Promise(r => setTimeout(r, 10000));
+                }
+              }
+              app.listen(PUERTO, () => console.log(`API escuchando en el puerto ${!PUERTO}`));
+            }
+
+            iniciar();
+            ARCHIVO
+
+            /opt/node/bin/npm install --omit=dev --no-audit --no-fund
+
+            # 4. Datos de conexion: CloudFormation pone el endpoint, el usuario y la contrasena. [NO CAMBIAR]
+            cat > /etc/api.env <<ARCHIVO
+            DB_HOST=${Database.Endpoint.Address}
+            DB_USER=${DBUser}
+            DB_PASSWORD=${DBPassword}
+            DB_NAME=proyecto
+            DB_SSL_CA=/opt/api/rds-ca.pem
+            INSTANCE_ID=$ID
+            AZ=$AZ
+            PORT=3000
+            ARCHIVO
+            chmod 600 /etc/api.env
+            chown -R ec2-user:ec2-user /opt/api
+
+            # Atajo para entrar a PostgreSQL desde el servidor:  sudo bd
+            cat > /usr/sbin/bd <<ARCHIVO
+            #!/bin/bash
+            PGPASSWORD='${DBPassword}' exec psql "host=${Database.Endpoint.Address} user=${DBUser} dbname=proyecto sslmode=require"
+            ARCHIVO
+            chmod 700 /usr/sbin/bd
+
+            # 5. Servicio de systemd: arranca la API y la reinicia si se cae. [NO CAMBIAR]
+            cat > /etc/systemd/system/api.service <<'ARCHIVO'
+            [Unit]
+            Description=API del proyecto final
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            User=ec2-user
+            WorkingDirectory=/opt/api
+            EnvironmentFile=/etc/api.env
+            ExecStart=/opt/node/bin/node server.js
+            Restart=always
+            RestartSec=5
+
+            [Install]
+            WantedBy=multi-user.target
+            ARCHIVO
+
+            systemctl daemon-reload
+            systemctl enable --now api
+
+  # Grupo de Auto Scaling: mantiene el número de servidores y reemplaza los que fallan.
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    # Al actualizar la pila con código nuevo, cambia los servidores de uno en uno
+    # sin apagar el sitio. [NO CAMBIAR]
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        PauseTime: PT4M
+    Properties:
+      VPCZoneIdentifier: [!Ref PublicSubnetA, !Ref PublicSubnetB]   # reparte en dos zonas
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      # [SE PUEDE CAMBIAR] cuántos servidores como mínimo y como máximo.
+      # Regla: MinSize <= DesiredCapacity <= MaxSize.
+      MinSize: "2"
+      MaxSize: "4"
+      DesiredCapacity: "2"
+      TargetGroupARNs: [!Ref TargetGroup]
+      HealthCheckType: ELB            # [NO CAMBIAR] usa la salud que ve el balanceador
+      HealthCheckGracePeriod: 300     # segundos de gracia mientras el servidor instala todo
+      Tags:
+        - { Key: Name, Value: !Sub "${AWS::StackName}-api", PropagateAtLaunch: true }
+
+  # Regla de escalado: si cada servidor recibe más de TargetValue peticiones por minuto,
+  # Auto Scaling agrega servidores (hasta MaxSize); si baja la carga, los quita.
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    DependsOn: HttpListener
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        TargetValue: 600              # [SE PUEDE CAMBIAR] más bajo = escala antes
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          ResourceLabel: !Sub "${ApplicationLoadBalancer.LoadBalancerFullName}/${TargetGroup.TargetGroupFullName}"
+
+  # ===================================================================================
+  # BALANCEADOR DE CARGA (Application Load Balancer)
+  # ===================================================================================
+
+  # El balanceador vive en las dos subredes públicas, una por zona. [NO CAMBIAR]
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-alb" }]
+
+  # Grupo de destino: los servidores que reciben el tráfico y cómo se revisa su salud.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 3000                      # [NO CAMBIAR] el puerto donde escucha la API
+      TargetType: instance
+      HealthCheckPath: /api/ping      # [NO CAMBIAR] ruta de la API que responde "ok"
+      HealthCheckIntervalSeconds: 10  # [SE PUEDE CAMBIAR] cada cuánto revisa (5 a 300)
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2        # [SE PUEDE CAMBIAR] éxitos para volver al reparto
+      UnhealthyThresholdCount: 2      # [SE PUEDE CAMBIAR] fallos para salir del reparto
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "20" }
+        # [SE PUEDE CAMBIAR] algoritmo de reparto. Quite el # de la línea siguiente para
+        # enviar cada petición al servidor menos ocupado en lugar de turnos (round robin):
+        # - { Key: load_balancing.algorithm.type, Value: least_outstanding_requests }
+
+  # Listener: escucha HTTP en el puerto 80 y reenvía todo al grupo de destino. [NO CAMBIAR]
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ===================================================================================
+  # CAPA DE PRESENTACIÓN: sitio estático en S3 servido por CloudFront
+  # ===================================================================================
+
+  # Bucket privado donde se suben index.html, estilos.css y app.js.
+  # El nombre lo genera AWS. [NO CAMBIAR] el bloqueo de acceso público.
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # OAC: la "identidad" con la que CloudFront firma sus pedidos al bucket. [NO CAMBIAR]
+  SiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront: entrega el sitio con HTTPS y envía /api/* al balanceador.
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "${AWS::StackName} - sitio en S3 y /api al balanceador"
+        DefaultRootObject: index.html   # [SE PUEDE CAMBIAR] la página que abre por defecto
+        HttpVersion: http2
+        PriceClass: PriceClass_100      # ubicaciones de América y Europa (la más barata)
+        Origins:
+          # Origen 1: el bucket S3 (archivos estáticos). [NO CAMBIAR]
+          - Id: sitio-s3
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          # Origen 2: el balanceador (la API). [NO CAMBIAR]
+          - Id: api-alb
+            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+        # Todo lo que no sea /api/* sale del bucket, con caché. [NO CAMBIAR] los ID de políticas:
+        # son fijos de AWS.
+        DefaultCacheBehavior:
+          TargetOriginId: sitio-s3
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6   # CachingOptimized
+          Compress: true
+        # /api/* va al balanceador, sin caché (cada petición llega a un servidor). [NO CAMBIAR]
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api-alb
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD, OPTIONS, PUT, PATCH, POST, DELETE]
+            CachedMethods: [GET, HEAD]
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad          # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader
+            Compress: true
+
+  # Política del bucket: solo ESTA distribución de CloudFront puede leer los archivos.
+  # [NO CAMBIAR]
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PermitirSoloCloudFront
+            Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+
+# -------------------------------------------------------------------------------------
+# SALIDAS: datos útiles que muestra la pestaña "Salidas" de la pila.
+# [NO CAMBIAR] los nombres: comandos-cloudshell.sh los lee. [SE PUEDE CAMBIAR] agregar más.
+# -------------------------------------------------------------------------------------
+Outputs:
+  SitioWeb:
+    Description: Abra esta direccion en el navegador
+    Value: !Sub "https://${Distribution.DomainName}"
+  BalanceadorAPI:
+    Description: API directa por el balanceador (para la prueba de carga)
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}/api/visita"
+  BucketSitio:
+    Description: Bucket donde se suben index.html, estilos.css y app.js
+    Value: !Ref SiteBucket
+  DistribucionId:
+    Description: ID de CloudFront (para invalidaciones)
+    Value: !Ref Distribution
+  EndpointBaseDatos:
+    Description: Endpoint privado de PostgreSQL (solo accesible desde los servidores)
+    Value: !GetAtt Database.Endpoint.Address
+  GrupoAutoScaling:
+    Description: Nombre del grupo de Auto Scaling
+    Value: !Ref AutoScalingGroup

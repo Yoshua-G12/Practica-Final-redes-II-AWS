@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Liga de Servidores AWS: balanceo de carga, servidores en la cancha y un muro para la afición de Redes II.">
+  <meta name="theme-color" content="#102d25">
+  <title>Liga de Servidores AWS</title>
+  <link rel="stylesheet" href="estilos.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="saltar" href="#contenido">Saltar al contenido</a>
+  <header class="estadio">
+    <nav class="navegacion" aria-label="Navegación principal">
+      <a class="marca" href="#inicio" aria-label="Liga de Servidores AWS, inicio">
+        <span class="marca-simbolo" aria-hidden="true">LS</span>
+        <span>LIGA DE SERVIDORES<span class="marca-sub">AWS · REDES II</span></span>
+      </a>
+      <div class="enlaces">
+        <a href="#equipos">La cancha</a>
+        <a href="#marcador">Marcador</a>
+        <a href="#aficion">La afición</a>
+      </div>
+      <span class="region">Ohio <span>us-east-2</span></span>
+    </nav>
+
+    <div class="hero" id="inicio">
+      <div class="hero-texto">
+        <p class="etiqueta"><span aria-hidden="true">✦</span> Práctica final · Redes II</p>
+        <h1>Liga de<br>Servidores <span>AWS</span></h1>
+        <p class="sub">La nube también juega en equipo.</p>
+        <p class="descripcion">Cada visita entra a la cancha. El balanceador reparte el juego y cada servidor deja su marca en el marcador.</p>
+        <a class="enlace-cancha" href="#equipos">Entrar a la cancha <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="estadio-grafico" aria-hidden="true">
+        <div class="campo-futbol">
+          <div class="linea-media"></div>
+          <div class="circulo-central"></div>
+          <div class="area area-arriba"></div>
+          <div class="area area-abajo"></div>
+          <div class="jugador jugador-a"><span>A</span></div>
+          <div class="jugador jugador-b"><span>B</span></div>
+          <span class="sector-campo sector-arriba">us-east-2a</span>
+          <span class="sector-campo sector-abajo">us-east-2b</span>
+        </div>
+        <p>Dos sectores. Una misma cancha.</p>
+      </div>
+    </div>
+
+    <div class="franja-jornada">
+      <span>ARQUITECTURA DE TRES CAPAS</span>
+      <span>S3 + CloudFront <i aria-hidden="true">/</i> EC2 + ALB <i aria-hidden="true">/</i> RDS PostgreSQL</span>
+    </div>
+  </header>
+
+  <main id="contenido">
+    <section class="tarjeta" id="equipos" aria-labelledby="titulo-servidor">
+      <p class="numero-seccion">01 <span>La cancha</span></p>
+      <h2 id="titulo-servidor">Equipos en la cancha</h2>
+      <p>Este es el equipo que atendió tu última visita. Su identidad es la de un servidor real.</p>
+      <div class="equipo-actual" id="equipo-actual" data-equipo="visitante">
+        <span class="escudo" id="equipo-letra" aria-hidden="true">—</span>
+        <div>
+          <span class="nombre" id="equipo-sector">Esperando el primer pase</span>
+          <h3 id="equipo-nombre">Equipo por confirmar</h3>
+        </div>
+      </div>
+      <div class="servidor">
+        <div>
+          <span class="nombre">Servidor (ID de instancia EC2)</span>
+          <span class="dato" id="srv-id">Pendiente</span>
+        </div>
+        <div>
+          <span class="nombre">Zona de disponibilidad</span>
+          <span class="dato" id="srv-zona">Pendiente</span>
+        </div>
+      </div>
+      <button id="btn-preguntar" type="button">Volver a preguntar <span aria-hidden="true">↗</span></button>
+      <div class="historial-contenedor">
+        <h3>Últimos pases</h3>
+        <p class="historial" id="historial">Todavía no hay respuestas en esta sesión.</p>
+      </div>
+      <details class="ficha">
+        <summary>Ficha oficial del equipo</summary>
+        <p>Consulta opcional a la nueva API. Puede responder otro servidor; la última visita se conserva arriba.</p>
+        <button id="btn-equipo" type="button" class="secundario">Consultar ficha</button>
+        <p id="ficha-equipo" role="status" aria-live="polite">La ficha es opcional. La cancha funciona también con la API anterior.</p>
+      </details>
+    </section>
+
+    <section class="tarjeta marcador" id="marcador" aria-labelledby="titulo-reparto">
+      <p class="numero-seccion">02 <span>La jornada</span></p>
+      <h2 id="titulo-reparto">Marcador de la jornada</h2>
+      <p>El reparto real del juego, registrado en PostgreSQL.</p>
+      <div class="marcador-total">
+        <span class="nombre">VISITAS REGISTRADAS</span>
+        <b id="total">—</b>
+        <span class="detalle-marcador">Cada petición a /api/visita cuenta.</span>
+      </div>
+      <div class="leyenda-equipos" aria-label="Equipos por zona">
+        <span><i class="punto punto-esmeralda" aria-hidden="true"></i> Esmeralda · us-east-2a</span>
+        <span><i class="punto punto-dorado" aria-hidden="true"></i> Dorado · us-east-2b</span>
+      </div>
+      <div id="barras" aria-label="Distribución de visitas por servidor">Esperando estadísticas.</div>
+      <p class="nota">Consulta automática cada 5 segundos entre respuestas. Consultar el marcador no genera visitas nuevas.</p>
+    </section>
+
+    <section class="tarjeta ancha" id="aficion" aria-labelledby="titulo-mensajes">
+      <div class="cabecera-seccion">
+        <div>
+          <p class="numero-seccion">03 <span>La grada</span></p>
+          <h2 id="titulo-mensajes">Muro de aficionados</h2>
+          <p>Deja tu mensaje para la liga. El servidor que lo reciba también firma la jugada.</p>
+        </div>
+        <button id="btn-mensajes" type="button" class="secundario">Actualizar mensajes</button>
+      </div>
+      <form id="formulario">
+        <div class="campo-formulario">
+          <label for="nombre">Tu nombre</label>
+          <input id="nombre" name="nombre" type="text" placeholder="¿Quién alienta desde la grada?"
+                 maxlength="80" autocomplete="name" required>
+        </div>
+        <div class="campo-formulario">
+          <label for="mensaje">Tu mensaje a la liga</label>
+          <textarea id="mensaje" name="mensaje" placeholder="Aquí se juega en equipo…"
+                    maxlength="500" rows="3" aria-describedby="ayuda-mensaje" required></textarea>
+          <span class="nombre" id="ayuda-mensaje">Hasta 500 caracteres. El mensaje quedará guardado en el muro.</span>
+        </div>
+        <button id="btn-guardar" type="submit">Publicar en el muro <span aria-hidden="true">↗</span></button>
+      </form>
+      <h3 class="titulo-grada">Desde la grada <span>Los últimos 50 mensajes</span></h3>
+      <ul id="mensajes"><li>Esperando mensajes.</li></ul>
+    </section>
+
+    <section class="tarjeta ancha estado-estadio" id="estado" aria-labelledby="titulo-estado">
+      <p class="numero-seccion">04 <span>El vestuario técnico</span></p>
+      <h2 id="titulo-estado">Estado del estadio</h2>
+      <p>Confirmaciones y avisos de cada operación, sin perder de vista el partido.</p>
+      <div class="estados">
+        <div><h3>Entrada a la cancha</h3><p id="estado-visita" role="status" aria-live="polite">Visita: pendiente.</p></div>
+        <div><h3>El marcador</h3><p id="estado-estadisticas" role="status" aria-live="polite">Estadísticas: pendientes.</p></div>
+        <div><h3>La afición</h3><p id="estado-mensajes" role="status" aria-live="polite">Mensajes: pendientes.</p></div>
+      </div>
+      <noscript><p>Active JavaScript para registrar visitas y consultar la API.</p></noscript>
+    </section>
+  </main>
+
+  <footer>
+    <a class="marca-footer" href="#inicio">LS <span>Liga de Servidores AWS</span></a>
+    <p>Redes II · Ingeniería en Sistemas · Grupo: <span>Por identificar</span></p>
+    <p>S3 + CloudFront · Node.js en EC2 · RDS PostgreSQL</p>
+  </footer>
+</body>
+</html>
